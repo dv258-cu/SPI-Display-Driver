@@ -58,6 +58,7 @@ target_include_directories(DisplaySPI PRIVATE
 # Add any user requested libraries
 target_link_libraries(DisplaySPI 
         hardware_spi
+        hardware_pwm
         )
 
 pico_add_extra_outputs(DisplaySPI)

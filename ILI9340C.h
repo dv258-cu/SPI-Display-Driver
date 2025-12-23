@@ -6,3 +6,7 @@ void lcd_set_on();
 uint16_t color_565(uint8_t r, uint8_t g, uint8_t b);
 void lcd_set_window(uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1);
 void lcd_fill_screen(uint16_t color);
+void lcd_set_brightness(uint8_t brightness);
+void lcd_fade_in(uint32_t duration_ms);
+void lcd_set_rotation(uint8_t m);
+void lcd_draw_pixel(uint16_t x, uint16_t y, uint16_t color);

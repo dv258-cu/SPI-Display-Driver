@@ -1,23 +1,24 @@
 #include "pico/stdlib.h"
 #include "hardware/spi.h"
+#include "hardware/pwm.h"
 
-#define SPI_PORT  spi0
-#define PIN_SCK   18
-#define PIN_MOSI  19
-#define PIN_CS    17
-#define PIN_DC    20
-#define PIN_RST   21
-#define PIN_BL    15
-#define PIN_SDCS  22  // Added SD Card Silence Pin
+#define SPI_PORT   spi0
+#define PIN_SCK    18
+#define PIN_MOSI   19
+#define PIN_CS     17
+#define PIN_DC     20
+#define PIN_RST    21
+#define PIN_BL     15
+#define PIN_SDCS   22 
 
 // Commands
-#define SW_RST    0x01
-#define EX_SLP    0x11
-#define DP_ON     0x29
-#define DP_OFF    0x28
-#define PIX_FMT   0x3A
-#define FRM_CTRL  0xB1
-#define DFP_CTRL  0xB6 // Display Function Control (The "Half-Pixel" Fix)
+#define SW_RST     0x01
+#define EX_SLP     0x11
+#define DP_ON      0x29
+#define DP_OFF     0x28
+#define PIX_FMT    0x3A
+#define MADCTL     0x36
+#define MEM_WR     0x2C
 
 void lcd_write_cmd(uint8_t cmd) {
     gpio_put(PIN_DC, 0); 
@@ -33,152 +34,121 @@ void lcd_write_data(uint8_t* buf, size_t len) {
     gpio_put(PIN_CS, 1);
 }
 
+void lcd_set_window(uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1) {
+    uint8_t x_buf[] = { (uint8_t)(x0 >> 8), (uint8_t)(x0 & 0xFF), (uint8_t)(x1 >> 8), (uint8_t)(x1 & 0xFF) };
+    uint8_t y_buf[] = { (uint8_t)(y0 >> 8), (uint8_t)(y0 & 0xFF), (uint8_t)(y1 >> 8), (uint8_t)(y1 & 0xFF) };
+
+    // Set Columns
+    lcd_write_cmd(0x2A); 
+    lcd_write_data(x_buf, 4);
+
+    // Set Rows
+    lcd_write_cmd(0x2B); 
+    lcd_write_data(y_buf, 4);
+}
+
 void lcd_init() {
-    // 1. Initialize Hardware Peripheral
-    spi_init(SPI_PORT, 10 * 1000 * 1000); 
+    spi_init(SPI_PORT, 20 * 1000 * 1000); // Bumped to 20MHz for faster fills
     gpio_set_function(PIN_SCK,  GPIO_FUNC_SPI);
     gpio_set_function(PIN_MOSI, GPIO_FUNC_SPI);
 
-    gpio_init(PIN_CS);
-    gpio_init(PIN_DC);
-    gpio_init(PIN_RST);
-    gpio_init(PIN_BL);
-    gpio_init(PIN_SDCS); // SD Card CS
+    gpio_init(PIN_CS); gpio_init(PIN_DC); gpio_init(PIN_RST); gpio_init(PIN_SDCS);
+    gpio_set_dir(PIN_CS, GPIO_OUT); gpio_set_dir(PIN_DC, GPIO_OUT);
+    gpio_set_dir(PIN_RST, GPIO_OUT); gpio_set_dir(PIN_SDCS, GPIO_OUT);
 
-    gpio_set_dir(PIN_CS,   GPIO_OUT);
-    gpio_set_dir(PIN_DC,   GPIO_OUT);
-    gpio_set_dir(PIN_RST,  GPIO_OUT);
-    gpio_set_dir(PIN_BL,   GPIO_OUT);
-    gpio_set_dir(PIN_SDCS, GPIO_OUT);
-
-    // 2. Initial State: Silence SD Card and Reset Display
-    gpio_put(PIN_SDCS, 1); // Pull SDCS High to stop interference
+    gpio_put(PIN_SDCS, 1); // Silence SD Card
     gpio_put(PIN_CS, 1);
-    gpio_put(PIN_BL, 1);   // Backlight on
-    
-    gpio_put(PIN_RST, 0);
-    sleep_ms(100);
-    gpio_put(PIN_RST, 1);
-    sleep_ms(150);
 
-    // 3. Software Reset & Wake
-    lcd_write_cmd(SW_RST);
-    sleep_ms(150);
-    lcd_write_cmd(EX_SLP);
-    sleep_ms(150);
+    // Hardware Reset (Only at the start!)
+    gpio_put(PIN_RST, 0); sleep_ms(100);
+    gpio_put(PIN_RST, 1); sleep_ms(150);
 
-    // 4. Power & VCOM Control (Fixes Dimness/Flicker)
-    lcd_write_cmd(0xC0); // Power Control 1
-    uint8_t p1 = 0x23; 
-    lcd_write_data(&p1, 1);
+    lcd_write_cmd(SW_RST); sleep_ms(150);
+    lcd_write_cmd(EX_SLP); sleep_ms(150);
 
-    lcd_write_cmd(0xC1); // Power Control 2
-    uint8_t p2 = 0x10; 
-    lcd_write_data(&p2, 1);
+    // Power Settings
+    uint8_t p1 = 0x23; lcd_write_cmd(0xC0); lcd_write_data(&p1, 1);
+    uint8_t p2 = 0x10; lcd_write_cmd(0xC1); lcd_write_data(&p2, 1);
+    uint8_t v1[] = {0x3E, 0x28}; lcd_write_cmd(0xC5); lcd_write_data(v1, 2);
 
-    lcd_write_cmd(0xC5); // VCOM Control 1
-    uint8_t v1[] = {0x3E, 0x28};
-    lcd_write_data(v1, 2);
+    // Pixel Format: 16-bit RGB565
+    uint8_t px = 0x55; lcd_write_cmd(PIX_FMT); lcd_write_data(&px, 1);
 
-    // 5. Frame Rate Control (Fixes "Scanline" flicker)
-    lcd_write_cmd(FRM_CTRL);
-    uint8_t f1[] = {0x00, 0x18}; // 79Hz refresh
-    lcd_write_data(f1, 2);
+    // Orientation
+    uint8_t m = 0x48; lcd_write_cmd(MADCTL); lcd_write_data(&m, 1);
 
-    // 6. Display Function Control (Fixes "Half-Pixel" look)
-    // This defines the scan mode and drive voltage for the panel
-    lcd_write_cmd(DFP_CTRL); 
-    uint8_t d1[] = {0x08, 0x82, 0x27};
-    lcd_write_data(d1, 3);
+    lcd_write_cmd(DP_ON); sleep_ms(100);
 
-    // 7. Pixel Format (Set to 16-bit RGB565)
-    lcd_write_cmd(PIX_FMT);
-    uint8_t px = 0x55;
-    lcd_write_data(&px, 1);
-
-    // 8. Final Display Enable
-    lcd_write_cmd(DP_ON);
-    sleep_ms(100);
-
-    lcd_write_cmd(SW_RST);
-    sleep_ms(150);
-
-    // --- EXTENDED POWER CONTROL ---
-    // Power on sequence control
-    uint8_t pwr_seq[] = {0x39, 0x2C, 0x00, 0x34, 0x02};
-    lcd_write_cmd(0xCB); lcd_write_data(pwr_seq, 5);
-
-    // Power control B
-    uint8_t pwr_b[] = {0x00, 0xC1, 0x30};
-    lcd_write_cmd(0xCF); lcd_write_data(pwr_b, 3);
-
-    // Driver timing control A
-    uint8_t drv_a[] = {0x85, 0x00, 0x78};
-    lcd_write_cmd(0xE8); lcd_write_data(drv_a, 3);
-
-    // Driver timing control B
-    uint8_t drv_b[] = {0x00, 0x00};
-    lcd_write_cmd(0xEA); lcd_write_data(drv_b, 2);
-
-    // Pump ratio control
-    uint8_t pump[] = {0x20};
-    lcd_write_cmd(0xF7); lcd_write_data(pump, 1);
-
-    lcd_write_cmd(EX_SLP);
-    sleep_ms(120);
-
-    gpio_put(PIN_RST, 0);
-    sleep_us(100);
-    gpio_put(PIN_RST, 1);
-    sleep_us(100);
-    lcd_write_cmd(DP_ON);
-    sleep_ms(100);
-}
-
-void lcd_set_off() {
-    lcd_write_cmd(DP_OFF);
-    gpio_put(PIN_BL, 0);
-}
-
-void lcd_set_on() {
-    lcd_write_cmd(DP_ON);
-    gpio_put(PIN_BL, 1);
-}
-
-uint16_t color_565(uint8_t r, uint8_t g, uint8_t b) {
-    return ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
-}
-
-void lcd_set_window(uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1) {
-    uint8_t data[4];
-
-    lcd_write_cmd(0x2A); // Column Address Set
-    data[0] = x0 >> 8; data[1] = x0 & 0xFF;
-    data[2] = x1 >> 8; data[3] = x1 & 0xFF;
-    lcd_write_data(data, 4);
-
-    lcd_write_cmd(0x2B); // Page (Row) Address Set
-    data[0] = y0 >> 8; data[1] = y0 & 0xFF;
-    data[2] = y1 >> 8; data[3] = y1 & 0xFF;
-    lcd_write_data(data, 4);
-
-    lcd_write_cmd(0x2C); // Memory Write (Prepare to receive pixels)
+    // PWM Setup for Backlight
+    gpio_set_function(PIN_BL, GPIO_FUNC_PWM);
+    uint slice_num = pwm_gpio_to_slice_num(PIN_BL);
+    pwm_set_wrap(slice_num, 255);
+    pwm_set_chan_level(slice_num, pwm_gpio_to_channel(PIN_BL), 0); // Start OFF
+    pwm_set_enabled(slice_num, true);
 }
 
 void lcd_fill_screen(uint16_t color) {
-    lcd_set_window(0, 0, 239, 319); // For a 240x320 display
+    // For Portrait: X goes 0-239, Y goes 0-319
+    lcd_set_window(0, 0, 239, 319); 
+    lcd_write_cmd(0x2C); // Memory Write
 
-    uint8_t high_byte = color >> 8;
-    uint8_t low_byte = color & 0xFF;
+    uint8_t hb = color >> 8;
+    uint8_t lb = color & 0xFF;
+    uint8_t pixel[2] = {hb, lb};
 
-    // Put DC High for Data once
     gpio_put(PIN_DC, 1);
     gpio_put(PIN_CS, 0);
-
-    for (int i = 0; i < 240 * 320; i++) {
-        spi_write_blocking(SPI_PORT, &high_byte, 1);
-        spi_write_blocking(SPI_PORT, &low_byte, 1);
+    // 240 * 320 = 76,800 pixels
+    for (uint32_t i = 0; i < (240 * 320); i++) {
+        spi_write_blocking(SPI_PORT, pixel, 2);
     }
-
     gpio_put(PIN_CS, 1);
 }
+
+void lcd_set_brightness(uint8_t brightness) {
+    pwm_set_gpio_level(PIN_BL, brightness);
+}
+
+void lcd_fade_in(uint32_t duration_ms) {
+    uint delay = duration_ms / 255;
+    for (int i = 0; i <= 255; i++) {
+        lcd_set_brightness(i);
+        sleep_ms(delay);
+    }
+}
+
+uint16_t screen_width = 320;
+uint16_t screen_height = 240;
+
+void lcd_set_rotation(uint8_t m) {
+    lcd_write_cmd(0x36); // MADCTL
+    lcd_write_data(&m, 1);
+    
+    // Update dimensions based on rotation bit (simplified logic)
+    if (m & 0x20) { // If the "Row/Column Exchange" bit is set
+        screen_width = 320;
+        screen_height = 240;
+    } else {
+        screen_width = 240;
+        screen_height = 320;
+    }
+}
+
+void lcd_draw_pixel(uint16_t x, uint16_t y, uint16_t color) {
+    // 1. Force the window to be exactly ONE pixel
+    lcd_set_window(x, y, x, y);
+
+    // 2. Open memory for writing
+    lcd_write_cmd(0x2C); 
+
+    // 3. Send the 2 color bytes manually
+    uint8_t hb = color >> 8;
+    uint8_t lb = color & 0xFF;
+
+    gpio_put(PIN_DC, 1); // Data mode
+    gpio_put(PIN_CS, 0); // Select
+    spi_write_blocking(SPI_PORT, &hb, 1);
+    spi_write_blocking(SPI_PORT, &lb, 1);
+    gpio_put(PIN_CS, 1); // Deselect - THIS STOPS THE FILL
+}
+
